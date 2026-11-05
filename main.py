@@ -225,3 +225,15 @@ def calculate_custom_analytics(payload: CustomAnalyticsRequest, db: Session = De
         "is_profitable": roi_percentage > 0,
         "breakdown": breakdown
     }
+    # main.py (Añadir al final del archivo)
+from ingest import fetch_and_ingest
+
+@app.post("/api/admin/ingest")
+@app.get("/api/admin/ingest")
+def trigger_ingest():
+    """Endpoint de administración para ejecutar la ingesta de datos en la nube."""
+    try:
+        fetch_and_ingest()
+        return {"status": "success", "message": "¡Ingesta de datos completada con éxito en la base de datos!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error durante la ingesta: {str(e)}")
