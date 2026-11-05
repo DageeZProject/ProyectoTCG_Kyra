@@ -21,13 +21,13 @@ SETS_TO_INGEST = [
 ]
 
 def fetch_and_ingest():
-    print("🔄 Verificando e inicializando tablas en PostgreSQL/SQLite...")
+    print("🔄 Verificando e inicializando tablas en la base de datos...")
     init_db()
 
     session = Session(engine)
 
     try:
-        # 1. Asegurar catálogo completo de rarezas
+        # 1. Catálogo completo de rarezas
         base_rarities = [
             "Common", "Uncommon", "Rare", "Double Rare", 
             "Ultra Rare", "Illustration Rare", "Special Illustration Rare", "Hyper Rare"
@@ -45,9 +45,8 @@ def fetch_and_ingest():
 
         for set_info in SETS_TO_INGEST:
             set_id = set_info["id"]
-            print(f"📦 Procesando set: {set_info['name']} ({set_id})...")
+            print(f"📦 Ingestando set: {set_info['name']} ({set_id})...")
 
-            # 2. Crear o recuperar el Set
             db_set = session.query(SetModel).filter(SetModel.id == set_id).first()
             if not db_set:
                 db_set = SetModel(
@@ -59,7 +58,7 @@ def fetch_and_ingest():
                 session.commit()
                 session.refresh(db_set)
 
-            # 3. Petición a la API externa
+            # Petición a TCGdex API
             url = f"https://api.tcgdex.net/v2/en/sets/{set_id}"
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
@@ -68,10 +67,14 @@ def fetch_and_ingest():
 
             set_data = resp.json()
             cards_list = set_data.get("cards", [])
-            db_set.total_cards = len(cards_list)
+            total_cards_count = len(cards_list)
+            db_set.total_cards = total_cards_count
             session.commit()
 
-            # 4. Clasificar cartas distribuyendo entre rarezas reales según su ID/Nombre
+            if total_cards_count == 0:
+                continue
+
+            # 2. Clasificación proporcional según el tamaño real del set
             for idx, card_summary in enumerate(cards_list):
                 card_id = card_summary.get("id")
                 if not card_id:
@@ -81,20 +84,22 @@ def fetch_and_ingest():
                 if not db_card:
                     card_name = card_summary.get("name", "Card")
                     
-                    # Deducción de rareza basada en la lista de cartas del set
-                    if idx < 100:
+                    # Proporción relativa (0.0 a 1.0)
+                    pct = idx / total_cards_count
+
+                    if pct < 0.40:
                         r_name = "Common"
-                    elif idx < 170:
+                    elif pct < 0.68:
                         r_name = "Uncommon"
-                    elif idx < 200:
+                    elif pct < 0.80:
                         r_name = "Rare"
-                    elif idx < 220:
+                    elif pct < 0.88:
                         r_name = "Double Rare"
-                    elif idx < 235:
+                    elif pct < 0.93:
                         r_name = "Ultra Rare"
-                    elif idx < 248:
+                    elif pct < 0.96:
                         r_name = "Illustration Rare"
-                    elif idx < 254:
+                    elif pct < 0.985:
                         r_name = "Special Illustration Rare"
                     else:
                         r_name = "Hyper Rare"
@@ -111,7 +116,6 @@ def fetch_and_ingest():
                     )
                     session.add(db_card)
                     
-                    # Historial de precio inicial por carta
                     price_record = PriceHistoryModel(
                         card_id=card_id,
                         price=1.50,
@@ -122,7 +126,7 @@ def fetch_and_ingest():
 
             session.commit()
 
-            # 5. Generar configuraciones de rareza por perfil (david y amigo)
+            # 3. Asignar configuraciones completas para los perfiles multiusuario
             rarities_in_db = session.query(RarityModel).all()
             profiles = ["david", "amigo"]
 
@@ -160,7 +164,7 @@ def fetch_and_ingest():
                         session.add(config)
 
             session.commit()
-            print(f"✅ Ingesta de '{set_info['name']}' completada con éxito.")
+            print(f"✅ Ingesta de '{set_info['name']}' corregida con éxito.")
 
     except Exception as e:
         session.rollback()
