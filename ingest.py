@@ -3,6 +3,7 @@ import requests
 from sqlalchemy.orm import Session
 from database import engine, SetModel, RarityModel, CardModel, PriceHistoryModel, SetRarityConfigModel, init_db
 
+# Mapa de Pull Rates por defecto
 DEFAULT_PULL_RATES = {
     "common": 4.0,
     "uncommon": 3.0,
@@ -20,33 +21,37 @@ SETS_TO_INGEST = [
     {"id": "sv03.5", "name": "151", "price": 5.50}
 ]
 
+# Lista base garantizada de rarezas
+BASE_RARITIES = [
+    "Common", "Uncommon", "Rare", "Double Rare", 
+    "Ultra Rare", "Illustration Rare", "Special Illustration Rare", "Hyper Rare"
+]
+
 def fetch_and_ingest():
-    print("🔄 Verificando e inicializando tablas en la base de datos...")
+    print("🔄 Inicializando infraestructura de tablas...")
     init_db()
 
     session = Session(engine)
 
     try:
-        # 1. Catálogo completo de rarezas
-        base_rarities = [
-            "Common", "Uncommon", "Rare", "Double Rare", 
-            "Ultra Rare", "Illustration Rare", "Special Illustration Rare", "Hyper Rare"
-        ]
-        
-        rarity_map = {}
-        for r_name in base_rarities:
+        # 1. Registrar y mapear todas las rarezas base en la BD
+        rarity_objects = {}
+        for r_name in BASE_RARITIES:
             db_rarity = session.query(RarityModel).filter(RarityModel.name == r_name).first()
             if not db_rarity:
                 db_rarity = RarityModel(name=r_name)
                 session.add(db_rarity)
                 session.commit()
                 session.refresh(db_rarity)
-            rarity_map[r_name.lower()] = db_rarity.id
+            rarity_objects[r_name] = db_rarity
+
+        rarity_list = list(rarity_objects.values())
 
         for set_info in SETS_TO_INGEST:
             set_id = set_info["id"]
-            print(f"📦 Ingestando set: {set_info['name']} ({set_id})...")
+            print(f"📦 Procesando set: {set_info['name']} ({set_id})...")
 
+            # 2. Registrar o recuperar el Set
             db_set = session.query(SetModel).filter(SetModel.id == set_id).first()
             if not db_set:
                 db_set = SetModel(
@@ -58,7 +63,7 @@ def fetch_and_ingest():
                 session.commit()
                 session.refresh(db_set)
 
-            # Petición a TCGdex API
+            # 3. Consultar datos del Set a la API
             url = f"https://api.tcgdex.net/v2/en/sets/{set_id}"
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
@@ -67,14 +72,10 @@ def fetch_and_ingest():
 
             set_data = resp.json()
             cards_list = set_data.get("cards", [])
-            total_cards_count = len(cards_list)
-            db_set.total_cards = total_cards_count
+            db_set.total_cards = len(cards_list)
             session.commit()
 
-            if total_cards_count == 0:
-                continue
-
-            # 2. Clasificación proporcional según el tamaño real del set
+            # 4. Ingestar cartas asignando rarezas de forma balanceada
             for idx, card_summary in enumerate(cards_list):
                 card_id = card_summary.get("id")
                 if not card_id:
@@ -84,27 +85,8 @@ def fetch_and_ingest():
                 if not db_card:
                     card_name = card_summary.get("name", "Card")
                     
-                    # Proporción relativa (0.0 a 1.0)
-                    pct = idx / total_cards_count
-
-                    if pct < 0.40:
-                        r_name = "Common"
-                    elif pct < 0.68:
-                        r_name = "Uncommon"
-                    elif pct < 0.80:
-                        r_name = "Rare"
-                    elif pct < 0.88:
-                        r_name = "Double Rare"
-                    elif pct < 0.93:
-                        r_name = "Ultra Rare"
-                    elif pct < 0.96:
-                        r_name = "Illustration Rare"
-                    elif pct < 0.985:
-                        r_name = "Special Illustration Rare"
-                    else:
-                        r_name = "Hyper Rare"
-
-                    r_id = rarity_map.get(r_name.lower(), rarity_map["common"])
+                    # Asignación segura: distribuye las cartas entre las rarezas disponibles
+                    assigned_rarity = rarity_list[idx % len(rarity_list)]
 
                     db_card = CardModel(
                         id=card_id,
@@ -112,10 +94,11 @@ def fetch_and_ingest():
                         number=card_summary.get("localId", str(idx + 1)),
                         image_url=card_summary.get("image"),
                         set_id=set_id,
-                        rarity_id=r_id
+                        rarity_id=assigned_rarity.id
                     )
                     session.add(db_card)
                     
+                    # Generar registro inicial de precio
                     price_record = PriceHistoryModel(
                         card_id=card_id,
                         price=1.50,
@@ -126,12 +109,11 @@ def fetch_and_ingest():
 
             session.commit()
 
-            # 3. Asignar configuraciones completas para los perfiles multiusuario
-            rarities_in_db = session.query(RarityModel).all()
+            # 5. Generar configuraciones completas para los perfiles multiusuario
             profiles = ["david", "amigo"]
 
             for profile in profiles:
-                for rarity in rarities_in_db:
+                for rarity in rarity_list:
                     config = session.query(SetRarityConfigModel).filter(
                         SetRarityConfigModel.user_id == profile,
                         SetRarityConfigModel.set_id == set_id,
@@ -164,11 +146,11 @@ def fetch_and_ingest():
                         session.add(config)
 
             session.commit()
-            print(f"✅ Ingesta de '{set_info['name']}' corregida con éxito.")
+            print(f"✅ Ingesta de '{set_info['name']}' completada con éxito.")
 
     except Exception as e:
         session.rollback()
-        print(f"❌ Error en ingesta: {e}")
+        print(f"❌ Error durante la ingesta: {e}")
         raise e
     finally:
         session.close()
